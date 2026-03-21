@@ -6,9 +6,9 @@ import os
 from datetime import datetime
 
 # ================== CONFIG ==================
-TOKEN = os.environ.get("BOT_TOKEN")
-API_KEY = os.environ.get("OPENWEATHER_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))   # Put your own Telegram user ID here
+TOKEN = os.environ.get("BOT_TOKEN")               # From BotFather
+API_KEY = os.environ.get("OPENWEATHER_KEY")       # From openweathermap.org/api_keys
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))     # Your Telegram ID (from @userinfobot)
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
@@ -19,12 +19,12 @@ c.execute("""CREATE TABLE IF NOT EXISTS subscribers
              (user_id INTEGER PRIMARY KEY, language TEXT DEFAULT 'en')""")
 conn.commit()
 
-# ================== FLOOD ZONES (Latest 2025-2026) ==================
+# ================== UPDATED FLOOD ZONES (2025-2026 real hotspots) ==================
 FLOOD_ZONES = [
-    "Garia", "Jadavpur", "Tollygunge", "Behala", "Ballygunge",
-    "Bansdroni", "Gariahat", "Salt Lake", "Rajarhat", "New Town",
-    "EM Bypass", "Park Street", "Camac Street", "Amherst Street",
-    "Howrah", "Alipore", "Kalighat", "Sonarpur"
+    "Garia", "Jadavpur", "Bansdroni", "Bijoygarh", "Tollygunge",
+    "Jodhpur Park", "Kalighat", "Topsia", "Ballygunge", "Alipore",
+    "Behala", "Salt Lake", "Rajarhat", "New Town", "EM Bypass",
+    "Howrah", "Sonarpur", "Park Street area"
 ]
 
 # ================== KEYBOARD ==================
@@ -38,7 +38,7 @@ def get_keyboard(lang="en"):
         markup.add("📲 Subscribe", "❌ Unsubscribe", "❓ Help")
     return markup
 
-# ================== HELPER FUNCTIONS ==================
+# ================== HELPERS ==================
 def get_user_lang(user_id):
     c.execute("SELECT language FROM subscribers WHERE user_id=?", (user_id,))
     row = c.fetchone()
@@ -52,46 +52,67 @@ def is_subscribed(user_id):
     c.execute("SELECT user_id FROM subscribers WHERE user_id=?", (user_id,))
     return c.fetchone() is not None
 
-# ================== WEATHER FETCH ==================
-def get_weather(city="Kolkata,IN", lang="en"):
-    url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={API_KEY}&units=metric&lang={'hi' if lang=='hi' else 'en'}"
+# ================== WEATHER FETCH (using CURRENT endpoint) ==================
+def get_weather(lang="en"):
+    url = f"https://api.openweathermap.org/data/2.5/weather?q=Kolkata,IN&appid={API_KEY}&units=metric&lang={'hi' if lang=='hi' else 'en'}"
     try:
-        data = requests.get(url, timeout=10).json()
-        if data["cod"] != "200":
-            return "Sorry, weather service is down right now."
+        response = requests.get(url, timeout=10)
+        print(f"API Status: {response.status_code} | Response: {response.text[:300]}...")  # For Render logs debug
+        
+        if response.status_code != 200:
+            return f"API Error: {response.status_code} - {response.json().get('message', 'Unknown')}"
+        
+        data = response.json()
+        if data.get("cod") != 200:
+            return f"Weather service error: {data.get('message', 'Unknown')} (code: {data.get('cod')})"
 
-        current = data["list"][0]
-        temp = current["main"]["temp"]
-        desc = current["weather"][0]["description"]
-        rain_prob = round(current.get("pop", 0) * 100)
-        wind = current["wind"]["speed"]
-        rain_mm = current.get("rain", {}).get("3h", 0)
+        # Extract fields from your provided JSON structure
+        weather = data["weather"][0]
+        desc = weather["description"].capitalize()
+        icon = weather["icon"]
+        main = data["main"]
+        temp = main["temp"]
+        feels_like = main["feels_like"]
+        humidity = main["humidity"]
+        pressure = main["pressure"]
+        wind = data["wind"]["speed"]
+        clouds = data["clouds"]["all"]
+        visibility = data["visibility"] / 1000  # km
+        sunrise = datetime.fromtimestamp(data["sys"]["sunrise"]).strftime("%I:%M %p")
+        sunset = datetime.fromtimestamp(data["sys"]["sunset"]).strftime("%I:%M %p")
 
-        # Next 3-6 hours
-        next_hours = data["list"][1:3]
-        forecast = "\n".join([f"• {int(item['dt']-data['list'][0]['dt'])/3600:.0f}h: {item['weather'][0]['description']} ({round(item.get('pop',0)*100)}% rain)" for item in next_hours])
+        # Simple risk logic (no pop in current API, so heuristic)
+        if "rain" in desc.lower() or "thunder" in desc.lower() or "shower" in desc.lower():
+            risk = "🟠 High rain risk" if clouds > 80 else "🟡 Moderate rain possible"
+        elif clouds > 70 and humidity > 80:
+            risk = "🟡 Haze with possible light rain/drizzle"
+        else:
+            risk = "✅ Low rain risk for now"
 
-        risk = "🟠 ORANGE ALERT" if rain_prob > 70 or "thunderstorm" in desc.lower() else "🟡 YELLOW ALERT" if rain_prob > 40 else "✅ Low risk"
+        return f"""🌧️ <b>Kolkata Weather (Current)</b>
 
-        return f"""🌧️ <b>Kolkata Weather</b>
+🌡️ {temp}°C (feels like {feels_like}°C)
+☁️ {desc}
+💧 Humidity: {humidity}%
+💨 Wind: {wind} m/s
+🌫️ Visibility: {visibility:.1f} km
+☁️ Clouds: {clouds}%
 
-🌡️ {temp}°C | 💨 {wind} m/s
-☁️ {desc.capitalize()}
-🌧️ Rain chance: {rain_prob}% | Rain: {rain_mm} mm
+🌅 Sunrise: {sunrise}   🌇 Sunset: {sunset}
 
 {risk}
 
-Next 6 hours:
-{forecast}"""
+Note: For hourly forecast alerts, stay subscribed!"""
     except Exception as e:
-        return "Error fetching weather. Try again later."
+        print(f"Exception in get_weather: {str(e)}")
+        return "Sorry, weather service is temporarily unavailable. Try again soon."
 
 # ================== HANDLERS ==================
 @bot.message_handler(commands=["start"])
 def start(message):
     lang = get_user_lang(message.chat.id)
     save_user(message.chat.id, lang)
-    text = "🌧️ <b>Welcome to Kolkata Rain & Flood Alert Bot!</b>\n\nGet instant weather, flood alerts & safety tips for Kolkata.\nUse the buttons below 👇" if lang == "en" else "🌧️ <b>कोलकाता रेन एंड फ्लड अलर्ट बॉट में स्वागत है!</b>\n\nकोलकाता के मौसम, बाढ़ अलर्ट और टिप्स पाएं। नीचे बटन इस्तेमाल करें 👇"
+    text = "🌧️ <b>Welcome to Kolkata Rain & Flood Alert Bot!</b>\n\nReal-time weather, flood warnings & tips for Kolkata.\nUse buttons below 👇" if lang == "en" else "🌧️ <b>कोलकाता रेन एंड फ्लड अलर्ट बॉट में स्वागत!</b>\n\nकोलकाता का मौसम, बाढ़ अलर्ट और टिप्स। नीचे बटन इस्तेमाल करें 👇"
     bot.send_message(message.chat.id, text, reply_markup=get_keyboard(lang))
 
 @bot.message_handler(commands=["weather", "मौसम"])
@@ -102,67 +123,66 @@ def weather_cmd(message):
 @bot.message_handler(commands=["alert", "अलर्ट"])
 def alert_cmd(message):
     lang = get_user_lang(message.chat.id)
-    # Using same weather logic for alert
     weather_text = get_weather(lang=lang)
-    if "ORANGE ALERT" in weather_text or "🟠" in weather_text:
-        extra = "⚠️ Heavy rain & thunderstorm possible today. Avoid low-lying areas!" if lang=="en" else "⚠️ आज भारी बारिश और गरज-चमक संभव। निचले इलाकों से बचें!"
-    elif "YELLOW ALERT" in weather_text or "🟡" in weather_text:
-        extra = "🟡 Moderate rain expected. Carry umbrella & check roads." if lang=="en" else "🟡 मध्यम बारिश की संभावना। छाता लेकर निकलें और सड़कों की जाँच करें।"
+    if "High rain risk" in weather_text or "Moderate rain" in weather_text or "thunder" in weather_text.lower():
+        extra = "⚠️ Rain/thunder possible — avoid low areas!" if lang=="en" else "⚠️ बारिश/गरज संभव — निचले इलाकों से बचें!"
+    elif "Haze" in weather_text:
+        extra = "🟡 Hazy conditions — poor visibility, drive carefully." if lang=="en" else "🟡 धुंध भरी स्थिति — दृश्यता कम, सावधानी से चलाएं।"
     else:
-        extra = "✅ No major rain risk today."
-    bot.send_message(message.chat.id, f"<b>Rain Alert for Kolkata</b>\n\n{extra}")
+        extra = "✅ No major alert right now." if lang=="en" else "✅ अभी कोई बड़ा अलर्ट नहीं।"
+    bot.send_message(message.chat.id, f"<b>Rain Alert Update</b>\n\n{extra}\n\n{weather_text}")
 
 @bot.message_handler(commands=["floodzones", "बाढ़ क्षेत्र"])
 def flood_cmd(message):
     lang = get_user_lang(message.chat.id)
     zones = "\n• ".join(FLOOD_ZONES)
-    text = f"<b>🚨 Flood-Prone Areas in Kolkata (Latest 2025-26)</b>\n\n• {zones}\n\n⚠️ Avoid these during heavy rain. Water clears slower here." if lang=="en" else f"<b>🚨 कोलकाता के बाढ़ प्रभावित क्षेत्र (2025-26)</b>\n\n• {zones}\n\n⚠️ भारी बारिश में इन इलाकों से बचें।"
+    text = f"<b>🚨 Major Waterlogging Areas (2025-2026)</b>\n\n• {zones}\n\n⚠️ These flood fast during heavy rain — avoid if possible." if lang=="en" else f"<b>🚨 प्रमुख जलभराव क्षेत्र (2025-2026)</b>\n\n• {zones}\n\n⚠️ भारी बारिश में ये जल्दी डूब जाते हैं — बचें।"
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=["tips", "टिप्स"])
 def tips_cmd(message):
     lang = get_user_lang(message.chat.id)
-    text = """💡 <b>Safety Tips During Rain</b>
+    text = """💡 <b>Rain Safety Tips</b>
 
-• Charge your phone fully
-• Avoid low-lying areas & underpasses
-• Carry umbrella + raincoat
+• Keep phone charged
+• Avoid flooded roads & underpasses
+• Carry umbrella/raincoat
 • Don't touch electric poles in water
-• Keep emergency contacts ready
-• Use metro/uber if roads are bad""" if lang=="en" else """💡 <b>बारिश के दौरान सुरक्षा टिप्स</b>
+• Use metro/apps if traffic bad
+• Check alerts before going out""" if lang=="en" else """💡 <b>बारिश सुरक्षा टिप्स</b>
 
-• फोन पूरी चार्ज रखें
-• निचले इलाकों और अंडरपास से बचें
-• छाता + रेनकोट साथ रखें
-• पानी में बिजली के खंभों को न छुएं
-• इमरजेंसी कॉन्टैक्ट तैयार रखें
-• सड़कें खराब हों तो मेट्रो/उबर यूज करें"""
+• फोन चार्ज रखें
+• जलभराव वाली सड़कें/अंडरपास से बचें
+• छाता/रेनकोट साथ रखें
+• पानी में बिजली के खंभे न छुएं
+• ट्रैफिक खराब हो तो मेट्रो/ऐप यूज करें
+• बाहर निकलने से पहले अलर्ट चेक करें"""
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=["subscribe", "सब्सक्राइब"])
 def subscribe(message):
     lang = get_user_lang(message.chat.id)
     save_user(message.chat.id, lang)
-    text = "✅ You are now subscribed for priority alerts!" if lang=="en" else "✅ आप अब प्राथमिकता अलर्ट के लिए सब्सक्राइब हो गए!"
+    text = "✅ Subscribed! You'll get priority weather alerts." if lang=="en" else "✅ सब्सक्राइब हो गए! प्राथमिकता अलर्ट मिलेंगे।"
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=["unsubscribe", "अनसब्सक्राइब"])
 def unsubscribe(message):
     c.execute("DELETE FROM subscribers WHERE user_id=?", (message.chat.id,))
     conn.commit()
-    text = "❌ You have been unsubscribed." if get_user_lang(message.chat.id)=="en" else "❌ आप अनसब्सक्राइब हो गए।"
+    text = "❌ Unsubscribed successfully." if get_user_lang(message.chat.id)=="en" else "❌ अनसब्सक्राइब सफल।"
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=["help", "मदद"])
 def help_cmd(message):
     lang = get_user_lang(message.chat.id)
-    text = "Just click the buttons or type commands. Bot updates every 3 hours.\n\nFor daily morning alert → stay subscribed!" if lang=="en" else "बस बटन दबाएं या कमांड टाइप करें। बॉट हर 3 घंटे अपडेट होता है।"
+    text = "Use the buttons or commands. Bot fetches fresh data every time.\nSubscribe for better alerts!" if lang=="en" else "बटन या कमांड यूज करें। बॉट हर बार नया डेटा लाता है। सब्सक्राइब करें बेहतर अलर्ट के लिए!"
     bot.send_message(message.chat.id, text)
 
 @bot.message_handler(commands=["hindi"])
 def set_hindi(message):
     save_user(message.chat.id, "hi")
-    bot.send_message(message.chat.id, "✅ भाषा हिंदी में सेट हो गई। अब सभी मैसेज हिंदी में आएंगे!", reply_markup=get_keyboard("hi"))
+    bot.send_message(message.chat.id, "✅ Language set to Hindi!", reply_markup=get_keyboard("hi"))
 
 @bot.message_handler(commands=["english"])
 def set_english(message):
@@ -172,21 +192,23 @@ def set_english(message):
 @bot.message_handler(commands=["broadcast"])
 def broadcast(message):
     if message.chat.id != ADMIN_ID:
-        bot.reply_to(message, "Admin only!")
+        bot.reply_to(message, "Admin only command!")
         return
     try:
         text = message.text.split(maxsplit=1)[1]
         c.execute("SELECT user_id FROM subscribers")
+        sent = 0
         for row in c.fetchall():
             try:
-                bot.send_message(row[0], f"📢 <b>Broadcast:</b>\n\n{text}")
+                bot.send_message(row[0], f"📢 <b>Admin Broadcast:</b>\n\n{text}")
+                sent += 1
             except:
                 pass
-        bot.reply_to(message, "Broadcast sent to all subscribers!")
+        bot.reply_to(message, f"Broadcast sent to {sent} users!")
     except:
-        bot.reply_to(message, "Use: /broadcast Your message here")
+        bot.reply_to(message, "Format: /broadcast Your message here")
 
-# ================== TEXT HANDLER (for keyboard clicks) ==================
+# ================== TEXT BUTTON HANDLER ==================
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
     lang = get_user_lang(message.chat.id)
@@ -207,6 +229,6 @@ def handle_text(message):
     elif "help" in txt or "मदद" in txt:
         help_cmd(message)
 
-# ================== START BOT ==================
-print("Kolkata Rain Bot is running...")
+# ================== RUN ==================
+print("Kolkata Rain & Flood Bot started...")
 bot.infinity_polling()
